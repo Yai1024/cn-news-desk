@@ -1,0 +1,16 @@
+# 真实密钥与本地配置：绝不入库
+agent.ini
+*.key
+.env
+
+# 抓取到的新闻内容（版权归原媒体，不授权再分发）
+output/
+
+# 编译产物
+*.o
+*.obj
+
+# 临时文件
+_bundle.txt
+_last_request.json
+_tmp*

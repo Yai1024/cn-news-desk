@@ -1,0 +1,391 @@
+======================================================================
+《人民日报》《新闻联播》每日内容获取方案
+整理日期：2026-10-26
+适用场景：个人学习、研究、每日摘要、资料归档
+======================================================================
+
+【先说结论】
+
+1. 两家都没有公开、稳定、有文档的官方 API。
+2. 新闻联播：央视网有每日页面和页面自用接口，可拿到标题、摘要、视频和全文。
+   社区还有每天自动更新好的 Markdown 仓库，最省事。
+3. 人民日报：只有官方电子版页面（HTML + 每版 PDF），没有公开 API。
+   社区项目可以自动下载并合并 PDF。
+4. 所有页面抓取方式都可能随官网改版失效，必须加缓存、重试和失败告警。
+5. 人民日报电子版有版权声明：仅供阅读、学习研究，未经授权不得商用或镜像。
+
+
+======================================================================
+一、新闻联播
+======================================================================
+
+----------------------------------------------------------------------
+方案 1：直接使用每天自动更新好的 Markdown（最省事，推荐先跑通）
+----------------------------------------------------------------------
+
+仓库：
+  https://github.com/DuckBurnIncense/xin-wen-lian-bo
+
+特点：
+  - GitHub Actions 每天自动抓取，定时为北京时间 20:30 左右。
+  - 输出当天完整文字稿：新闻摘要 + 每条详细新闻 + 央视原文链接。
+  - 2026-10 仍在正常更新。
+
+当天文件 URL 规律：
+  https://raw.githubusercontent.com/DuckBurnIncense/xin-wen-lian-bo/master/news/YYYYMMDD.md
+
+示例（2026-10-25）：
+  https://raw.githubusercontent.com/DuckBurnIncense/xin-wen-lian-bo/master/news/20261025.md
+
+索引文件：
+  https://raw.githubusercontent.com/DuckBurnIncense/xin-wen-lian-bo/master/README.md
+  https://raw.githubusercontent.com/DuckBurnIncense/xin-wen-lian-bo/master/news/catalogue.json
+
+优点：
+  - 零代码，定时 curl 即可。
+  - 已经是整理好的 Markdown，方便直接给大模型或知识库使用。
+
+缺点：
+  - 依赖第三方仓库，仓库停更或改名就失效。
+  - 建议保留方案 2 作为回退。
+
+----------------------------------------------------------------------
+方案 2：自己抓央视网官方页面（推荐作为主方案或回退）
+----------------------------------------------------------------------
+
+每日索引页：
+  https://tv.cctv.com/lm/xwlb/day/YYYYMMDD.shtml
+
+示例：
+  https://tv.cctv.com/lm/xwlb/day/20261025.shtml
+
+页面结构：
+  - 页面里有当天所有新闻的链接。
+  - 去重后，第一个链接是“本期节目主要内容”摘要页。
+  - 其余链接是当天每条新闻的独立页面。
+
+单条新闻页提取规则：
+  - 标题：CSS 选择器  .playingVideo .tit
+  - 正文：CSS 选择器  #content_area
+  - 标题里可能带 “[视频]” 前缀，需要去掉。
+
+处理流程：
+  1. GET 每日索引页。
+  2. 提取所有 https://tv.cctv.com/YYYY/MM/DD/VIDE*.shtml 链接并去重。
+  3. 第一个链接作为摘要页。
+  4. 其余链接逐条 GET，提取标题和 #content_area 正文。
+  5. 按顺序拼接，输出 Markdown 或纯文本。
+
+优点：
+  - 直接来自央视网，不依赖第三方仓库。
+  - 能拿到每条新闻的完整正文。
+
+缺点：
+  - 页面结构改版后选择器会失效。
+  - 需要控制请求频率，不要并发猛拉。
+
+----------------------------------------------------------------------
+方案 3：央视栏目接口（标题、摘要、视频，不是全文）
+----------------------------------------------------------------------
+
+接口地址：
+  https://api.cntv.cn/NewVideo/getVideoListByColumn?id=TOPC1451528971114112&n=20&sort=desc&p=1&mode=0&serviceId=tvcctv
+
+说明：
+  - TOPC1451528971114112 是《新闻联播》栏目 ID。
+  - 返回字段包括：title、time、brief、url、guid 等。
+  - brief 是“本期节目主要内容”的条目列表，不是完整文字稿。
+  - 这是央视页面自用接口，没有公开文档，可能变更。
+  - 海外网络环境可能不稳定。
+  - 已验证 2026-10-25 当天数据可正常返回。
+
+适合用途：
+  - 快速判断“今天新闻联播播了什么”。
+  - 获取当天视频链接和标题清单。
+  - 不适合直接当全文源。
+
+----------------------------------------------------------------------
+方案 4：其他 GitHub 项目
+----------------------------------------------------------------------
+
+1. divenire990/cctv-news-scraper-skill
+   https://github.com/divenire990/cctv-news-scraper-skill
+   - Python / Claude Code Skill。
+   - 支持 2014-01-01 至今的连续时间线。
+   - 输出 JSON、Markdown，可选 docx。
+   - 带质量门控、断点清单，适合批量回补历史。
+   - 2026-08 仍在更新。
+
+2. yuekcc/cctv_xwlb
+   https://github.com/yuekcc/cctv_xwlb
+   - 新闻联播文字稿归档。
+   - 最后更新停在 2024-08，不适合当每日源。
+   - 可作为代码参考。
+
+3. lixiang0/xwlb
+   https://github.com/lixiang0/xwlb
+   - 老项目，抓取央视网历年新闻联播。
+   - 适合研究历史抓取思路。
+
+4. RSSHub 路由
+   https://rsshub.app/cctv/lm/xwlb
+   - 返回当天节目列表、视频和摘要。
+   - 不是完整文字稿。
+   - 公开实例可能被 Cloudflare 拦截或限流，长期使用建议自建 RSSHub。
+
+
+======================================================================
+二、人民日报
+======================================================================
+
+----------------------------------------------------------------------
+方案 1：官方电子版页面（唯一稳定的官方内容源）
+----------------------------------------------------------------------
+
+当天版面首页：
+  https://paper.people.com.cn/rmrb/pc/layout/YYYYMM/DD/node_01.html
+
+示例：
+  https://paper.people.com.cn/rmrb/pc/layout/202610/26/node_01.html
+
+页面结构：
+  - node_01.html 到 node_N.html，每天版数不同。
+  - 每个版面页里有当天该版的文章链接。
+  - 文章链接规律：
+      .../content/YYYYMM/DD/content_*.html
+  - 每个版面还有一个 PDF：
+      .../attachement/YYYYMM/DD/<uuid>.pdf
+  - PDF 的 uuid 每天不同，必须从页面解析，不能直接拼接。
+
+文章页提取规则：
+  - 正文：CSS 选择器  #ozoom
+  - 兼容旧选择器：#rwb_zw、.rm_txt_con、.show_text
+  - 标题：<h1> 标签
+
+处理流程（文字版）：
+  1. GET node_01.html。
+  2. 从页面导航或链接中解析出 node_01 到 node_N。
+  3. 逐版 GET，收集文章链接并去重。
+  4. 逐篇 GET 文章页，提取 <h1> 和 #ozoom。
+  5. 按版面顺序输出 Markdown。
+
+处理流程（PDF 版）：
+  1. 同上解析每个版面的 PDF 链接。
+  2. 下载所有版面 PDF。
+  3. 用 pypdf / PyPDF2 合并成一个完整 PDF。
+
+优点：
+  - 官方内容源，权威、稳定。
+  - 同时有文字和 PDF。
+
+缺点：
+  - 没有公开 API。
+  - 版面数量、HTML 结构、PDF 地址规则可能改版。
+  - 版权限制：仅供个人阅读、学习研究，禁止商用和镜像。
+
+----------------------------------------------------------------------
+方案 2：现成 GitHub 项目
+----------------------------------------------------------------------
+
+1. AnzhiZhang/PeoplesDaily（推荐）
+   https://github.com/AnzhiZhang/PeoplesDaily
+   - Python，每日自动获取人民日报电子版。
+   - 下载各版 PDF，并支持合并。
+   - 支持 cron、邮件、OSS 上传、AI 每日摘要。
+   - 有 Docker 镜像：zhanganzhi/peoplesdaily
+   - 2026-10 仍在活跃更新。
+   - 注意：仓库里的 GitHub Actions 每日定时任务被注释掉了。
+     需要自己用 Docker、本机 cron 或手动触发，不会自动每天在 GitHub 上跑。
+
+   基本用法：
+     python main.py
+     python main.py 2021-01-01
+
+   Docker 用法：
+     docker run --rm \
+       -v /path/config:/peoplesdaily/config \
+       -v /path/data:/peoplesdaily/data \
+       zhanganzhi/peoplesdaily
+
+2. dividduang/rmrb_skill
+   https://github.com/dividduang/rmrb_skill
+   - 基于 Playwright，下载并合并当天所有版面 PDF。
+   - 支持命令行、Claude Code Skill、JSON 输出。
+   - 默认每天早 8 点定时。
+   - 2026-04 更新。
+
+3. Kings-en/rmrb-pdf-fetcher
+   https://github.com/Kings-en/rmrb-pdf-fetcher
+   - 原版人民日报 PDF 下载器。
+   - main 分支：下载并合并 PDF。
+   - article-crawler 分支：抓文章并汇总成 PDF。
+
+4. caspiankexin/people-daily-crawler-date
+   https://github.com/caspiankexin/people-daily-crawler-date
+   - 按日期抓取人民日报。
+   - 代码较简单，适合二次修改。
+
+----------------------------------------------------------------------
+方案 3：RSSHub 的边界
+----------------------------------------------------------------------
+
+人民网头条：
+  https://rsshub.app/people
+
+说明：
+  - 这是人民网“首页头条”RSS，不是人民日报电子版。
+  - 不能替代人民日报每日版面或全文。
+  - 新闻联播可用 https://rsshub.app/cctv/lm/xwlb，但主要是视频和摘要。
+
+结论：
+  RSSHub 适合做轻量订阅，不适合作为人民日报每日全文方案。
+
+
+======================================================================
+三、零代码 / 聚合工具
+======================================================================
+
+1. RSSHub
+   - 新闻联播：https://rsshub.app/cctv/lm/xwlb
+   - 人民网头条：https://rsshub.app/people
+   - 公开实例可能限流，长期使用建议自建。
+   - 自建方式：Docker 部署 RSSHub，具体见官方文档。
+
+2. NewsNow / newsnow-mcp-server
+   https://github.com/ourongxing/newsnow
+   https://github.com/ourongxing/newsnow-mcp-server
+   - 40+ 热榜/新闻源聚合。
+   - 适合标题级热点，不适合人民日报版面或新闻联播全文。
+
+3. FeedX 等第三方 RSS
+   - 可能有人民日报全文 RSS，但属于第三方服务，稳定性和授权需自行确认。
+   - 不建议作为唯一数据源。
+
+
+======================================================================
+四、商业 / 授权接口
+======================================================================
+
+1. 万象数据
+   https://api.vsaa.cn/detail/55
+   - 有新闻联播接口。
+   - 付费服务，价格、配额、稳定性需自行确认。
+
+2. 人民网图文数据库
+   https://paper.people.com.cn/
+   - 官方历史资料库。
+   - 当前电子版可免费阅读。
+   - 历史库/机构订阅/API 以官网为准。
+
+3. cn.govopendata
+   https://cn.govopendata.com/
+   - 新闻联播每天有免费全文网页，页面含 JSON-LD 的 articleBody，可解析。
+   - 人民日报只有 1946–2003 历史档案，不适合当天人民日报。
+   - 属于第三方站点，不建议作为唯一来源。
+
+
+======================================================================
+五、推荐落地方案
+======================================================================
+
+【新闻联播】
+
+每天 20:45：
+  1. 先拉 DuckBurnIncense 的当天 Markdown：
+     https://raw.githubusercontent.com/DuckBurnIncense/xin-wen-lian-bo/master/news/YYYYMMDD.md
+  2. 如果 404 或内容为空，回退到央视日页：
+     https://tv.cctv.com/lm/xwlb/day/YYYYMMDD.shtml
+  3. 解析 #content_area，自己拼全文。
+
+每天 21:30：
+  - 再重试一次，防止当天更新延迟。
+
+【人民日报】
+
+每天 07:30：
+  1. 用 AnzhiZhang/PeoplesDaily 的 Docker 镜像跑一次，产出合并 PDF。
+  2. 如果要文字版，解析 node_*.html 里的文章链接，再取 #ozoom。
+  3. 保存到按日期命名的目录。
+
+每天 09:00：
+  - 重试一次，防止早上版面未出全。
+
+【通用要求】
+
+  - 按日期缓存，避免重复抓取。
+  - 每次请求加 User-Agent。
+  - 串行或低并发，建议间隔 1–2 秒。
+  - 失败重试 2–3 次，指数退避。
+  - 记录日志：日期、来源、条数、失败原因。
+  - 连续失败时发通知（邮件、Server 酱、钉钉、企业微信等）。
+  - 不要绕过验证码、登录或付费墙。
+
+
+======================================================================
+六、最小验证命令
+======================================================================
+
+Linux / macOS / Git Bash：
+
+  # 新闻联播当天 Markdown
+  curl -L "https://raw.githubusercontent.com/DuckBurnIncense/xin-wen-lian-bo/master/news/$(date +%Y%m%d).md"
+
+  # 新闻联播官方日页
+  curl -L "https://tv.cctv.com/lm/xwlb/day/$(date +%Y%m%d).shtml"
+
+  # 人民日报当天头版
+  curl -L "https://paper.people.com.cn/rmrb/pc/layout/$(date +%Y%m)/$(date +%d)/node_01.html"
+
+Windows PowerShell：
+
+  # 新闻联播当天 Markdown
+  curl.exe -L "https://raw.githubusercontent.com/DuckBurnIncense/xin-wen-lian-bo/master/news/$(Get-Date -Format yyyyMMdd).md"
+
+  # 新闻联播官方日页
+  curl.exe -L "https://tv.cctv.com/lm/xwlb/day/$(Get-Date -Format yyyyMMdd).shtml"
+
+  # 人民日报当天头版
+  curl.exe -L "https://paper.people.com.cn/rmrb/pc/layout/$(Get-Date -Format yyyyMM)/$(Get-Date -Format dd)/node_01.html"
+
+
+======================================================================
+七、注意事项与合规
+======================================================================
+
+1. 所有接口和页面都可能改版，没有 SLA。
+2. 央视 api.cntv.cn 是页面自用接口，不是正式开放 API。
+3. 人民日报电子版版权声明：
+   内容仅供阅读、学习研究使用；未经授权，不得用于商业目的，
+   不得转载、复制、发行或镜像。
+4. 个人做每日摘要、研究分析通常没问题；商用请走授权。
+5. 控制抓取频率，遵守 robots.txt 和网站条款。
+6. 不建议把抓取内容公开再分发或做成镜像站。
+7. 第三方 GitHub 仓库可能随时停更，生产环境要有回退方案。
+
+
+======================================================================
+八、方案选择建议（一句话版）
+======================================================================
+
+  - 只想每天拿到新闻联播全文：
+      用 DuckBurnIncense 的 raw Markdown。
+
+  - 想稳定、可控、不依赖第三方：
+      自己抓 tv.cctv.com 的 day 页面 + #content_area。
+
+  - 只想每天拿到人民日报 PDF：
+      用 AnzhiZhang/PeoplesDaily 的 Docker 镜像。
+
+  - 想要人民日报文字版：
+      解析 paper.people.com.cn 的 node 页面和 #ozoom。
+
+  - 想要零代码订阅：
+      新闻联播用 RSSHub /cctv/lm/xwlb；
+      人民日报没有现成 RSS 全文方案，需要自己抓。
+
+  - 需要商业 SLA 或授权：
+      走万象数据、人民网图文数据库等商业/机构渠道。
+
+======================================================================
+完
+======================================================================
