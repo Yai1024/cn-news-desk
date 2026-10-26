@@ -1,0 +1,40 @@
+# 解读 Agent 配置模板（UTF-8）
+#
+# 使用方法：把本文件复制成 agent.ini，然后填入自己的密钥。
+#   copy agent.ini.example agent.ini
+#
+# agent.ini 已被 .gitignore 屏蔽，不会进入仓库；请勿提交真实密钥。
+
+[api]
+# OpenAI 兼容端点；DeepSeek 官方为 https://api.deepseek.com
+base_url=https://api.deepseek.com
+model=deepseek-chat
+# 留空则「开始解读」只提示、不发请求；也可用环境变量 DEEPSEEK_API_KEY 覆盖
+api_key=
+
+# 厂商特有的联网/检索参数，原样拼进请求体。
+# DeepSeek 官方端点没有联网参数，留空即可；若用支持联网的中转端点，可填：
+#   extra_json={"enable_search":true}
+# 若接口因该参数返回 400，agent_host 会自动去掉它重试一次。
+extra_json=
+
+max_tokens=8000
+temperature=0.8
+timeout_seconds=300
+
+# 传输层重试轮数：遇到连接重置（12152）、超时或 5xx 自动重试
+retries=3
+# 代理：auto=先直连，失败再走这里；direct=永不走代理；always=总是走代理
+# 留空则完全不用代理
+proxy=
+proxy_mode=auto
+
+[agent]
+# 近几日窗口（与抓取程序的 7 天一致）
+days=7
+# 1=允许读取 7 天以前的稿件，只取标题用于长期趋势
+extend_history=1
+# 材料包长度上限（字符），超出按优先级截断
+max_input_chars=60000
+# 技能包目录（相对 agent_host.exe）
+skill_dir=skill
