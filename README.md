@@ -4,7 +4,41 @@
 **7 天**，把还没有保存过的日期补齐，因此不需要每天打开：隔几天点一次
 `运行.bat`，中间缺的日期会自动补上。
 
-## 一键使用
+## 一键安装（推荐）
+
+双击仓库根目录的 **`政策解读台-安装程序.exe`**，按向导操作：
+
+1. 选择安装位置（默认 `%LOCALAPPDATA%\Programs\政策解读台`，**不需要管理员权限**）；
+2. 在安装界面直接粘贴 DeepSeek API 密钥（写入本机 `agent.ini`，也可以先跳过）；
+3. 完成后可勾选「立即运行政策解读台」。
+
+安装包已内置主界面、抓取器、解读 Agent、`skill\` 方法论和卸载程序，目标机器
+不需要安装编译器、Python 或任何运行库。
+
+> 安装包没有代码签名，首次运行时 Windows SmartScreen 可能提示“Windows 已保护你的电脑”。
+> 点「更多信息」→「仍要运行」即可；程序只写入当前用户目录，不需要管理员权限。
+
+安装后开始菜单会出现：
+
+- **政策解读台**
+- **使用说明**
+- **修改 API 密钥**（用记事本打开 `agent.ini`）
+- **卸载政策解读台**
+
+卸载默认保留 `output\` 稿件和 `agent.ini`；也可以在卸载窗口选择「卸载并删除全部数据」。
+
+静默安装（批量部署用）：
+
+```bat
+政策解读台-安装程序.exe /S /D=C:\Apps\政策解读台 /KEY=sk-你的密钥
+```
+
+可选参数：`/BASE=`（接口地址）、`/MODEL=`（模型名）、`/NODESKTOP`（不建桌面快捷方式）。
+安装日志在 `%TEMP%\政策解读台-安装日志.txt`。
+
+## 一键使用（源码目录）
+
+如果你不使用安装包、直接在源码目录里运行：
 
 双击 **`运行.bat`**。
 
@@ -399,14 +433,25 @@ build_desk.bat
 
 ```bat
 g++ -std=c++17 -O2 -static -static-libgcc -static-libstdc++ agent_host.cpp -o agent_host.exe -lwinhttp
-g++ -std=c++17 -O2 -static -static-libgcc -static-libstdc++ -mwindows news_desk.cpp -o news_desk.exe -lshell32 -luser32 -lgdi32
+g++ -std=c++17 -O2 -static -static-libgcc -static-libstdc++ -mwindows news_desk.cpp -o news_desk.exe -lshell32 -luser32 -lgdi32 -lgdiplus
 ```
+
+生成安装包：
+
+```bat
+build_installer.bat
+```
+
+它会先把现有的三个 exe、`skill\`、配置模板和卸载程序打成一个载荷，再用 MinGW
+（含 `windres`）编译自绘安装界面，输出 `政策解读台-安装程序.exe`。
+安装程序源码在 `installer\`，载荷清单在 `installer\payload.txt`，中间产物在
+`installer_build\`（已忽略，不入库）。
 
 ### 已知限制
 
-- 「获取新闻稿」走 `运行.bat`，每次都会先用 g++ 重编 `main.cpp`（约 10 秒）；
-  机器上没有 g++ 时该脚本会回退到已有的 `fetch_news.exe`。
-  想跳过重编，把 `fetchCommand()` 改成直接调用 `fetch_news.exe` 即可。
+- 源码目录里的「获取新闻稿」走 `运行.bat`，每次都会先用 g++ 重编 `main.cpp`（约 10 秒）；
+  机器上没有 g++ 时该脚本会回退到已有的 `fetch_news.exe`。安装包内附带的是只运行
+  `fetch_news.exe` 的简化版 `运行.bat`，不会在用户机器上尝试编译。
 - 材料包按 `max_input_chars` 截断，超出部分标为"无法取证"而非丢弃后静默分析。
 - 10-26 这类"仅标题、无正文"的稿件会被识别为材料不全，不计入出现率统计。
 - 解读接口**仅验证过 DeepSeek 官方端点**；其他 OpenAI 兼容服务需自行实测（见上文第 8 节）。

@@ -10,6 +10,9 @@ output/
 *.o
 *.obj
 
+# 安装包构建中间产物
+installer_build/
+
 # 临时文件
 _bundle.txt
 _last_request.json
