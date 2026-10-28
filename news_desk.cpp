@@ -1,5 +1,5 @@
 // ============================================================================
-//  news_desk.exe —— 政策解读台（Win32 主界面）
+//  news_desk.exe —— 政策解读台（Win32 自绘主界面）
 //
 //  · 「获取新闻稿」：后台运行同目录的 运行.bat（即 fetch_news.exe），
 //    以隐藏窗口方式执行，实时把输出回显到窗口，完成后自动盘点 output/。
@@ -7,14 +7,20 @@
 //    通过管道逐字流式回显它调用 API 得到的解读结果。
 //  · 「停止」：连同子进程树一并结束。
 //
+//  界面为纯 Win32 + GDI+ 自绘（GDI+ 为系统组件，非第三方框架）：
+//  编辑室浅色配色、圆角卡片、自绘按钮与细滚动条，无任何外部资源依赖。
 //  本程序不含任何解读逻辑；解读完全由 agent_host + skill/ 完成。
 // ============================================================================
 
 #define _WIN32_WINNT 0x0601
+#define UNICODE
+#define _UNICODE
 #define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
 #include <windows.h>
 #include <shellapi.h>
-#include <commctrl.h>
+#include <objidl.h>
+#include <gdiplus.h>
 
 #include <atomic>
 #include <cstdio>
@@ -22,6 +28,7 @@
 #include <string>
 #include <vector>
 
+using namespace Gdiplus;
 using std::string;
 using std::wstring;
 
@@ -34,7 +41,7 @@ using std::wstring;
 #define ID_BTN_STOP 1003
 #define ID_BTN_OPEN 1004
 #define ID_TXT 1010
-#define ID_STATUS 1011
+#define ID_SCROLL 1020
 
 #define WM_APP_CHUNK (WM_APP + 1)
 #define WM_APP_STATUS (WM_APP + 2)
@@ -42,11 +49,50 @@ using std::wstring;
 
 static HWND g_hwnd = nullptr;
 static HWND g_btnFetch = nullptr, g_btnRun = nullptr, g_btnStop = nullptr, g_btnOpen = nullptr;
-static HWND g_txt = nullptr, g_status = nullptr;
-static HFONT g_fontUi = nullptr, g_fontText = nullptr;
+static HWND g_txt = nullptr, g_sb = nullptr;
+static HFONT g_fontEdit = nullptr;
+static HBRUSH g_brWhite = nullptr;
 static std::atomic<bool> g_running(false);
 static HANDLE g_job = nullptr;
 static bool g_lastWasFetch = false;
+static int g_dpi = 96;
+
+static Font* g_fTitle = nullptr;
+static Font* g_fSub = nullptr;
+static Font* g_fBtn = nullptr;
+static Font* g_fBtnBold = nullptr;
+static Font* g_fCard = nullptr;
+static Font* g_fPill = nullptr;
+static Font* g_fSmall = nullptr;
+static FontFamily* g_family = nullptr;
+
+// ----------------------------------------------------------------------------
+// 配色（编辑室浅色）
+// ----------------------------------------------------------------------------
+
+namespace C {
+static const Color BG(255, 250, 248, 245);           // #FAF8F5 纸感底色
+static const Color CARD(255, 255, 255, 255);
+static const Color BORDER(255, 231, 226, 218);       // #E7E2DA
+static const Color INK(255, 27, 27, 27);             // #1B1B1B
+static const Color MUTED(255, 122, 115, 107);        // #7A736B
+static const Color FAINT(255, 168, 161, 152);
+static const Color ACCENT(255, 200, 50, 43);         // #C8322B 党政红
+static const Color ACCENT_HOVER(255, 176, 42, 36);
+static const Color ACCENT_DOWN(255, 153, 36, 31);
+static const Color ACCENT_SOFT(255, 252, 243, 241);
+static const Color GHOST_HOVER(255, 243, 239, 234);
+static const Color DISABLED_BG(255, 241, 238, 234);
+static const Color DISABLED_FG(255, 183, 176, 168);
+static const Color PILL_BG(255, 241, 235, 228);
+static const Color OK(255, 46, 125, 91);             // #2E7D5B
+static const Color THUMB(255, 222, 216, 207);
+static const Color THUMB_HOVER(255, 200, 193, 183);
+}  // namespace C
+
+static int px(int v) { return MulDiv(v, g_dpi, 96); }
+
+static int mouseY(LPARAM l) { return (int)(short)HIWORD(l); }
 
 // ----------------------------------------------------------------------------
 // 编码
@@ -162,6 +208,397 @@ static string readIniKey(const wstring& file, const string& key) {
 }
 
 // ----------------------------------------------------------------------------
+// GDI+ 绘图辅助
+// ----------------------------------------------------------------------------
+
+static void makeRound(GraphicsPath& p, const RectF& r, float rad) {
+    if (rad <= 0.5f) { p.AddRectangle(r); return; }
+    float d = rad * 2.0f;
+    if (d > r.Width) d = r.Width;
+    if (d > r.Height) d = r.Height;
+    p.AddArc(r.X, r.Y, d, d, 180.0f, 90.0f);
+    p.AddArc(r.X + r.Width - d, r.Y, d, d, 270.0f, 90.0f);
+    p.AddArc(r.X + r.Width - d, r.Y + r.Height - d, d, d, 0.0f, 90.0f);
+    p.AddArc(r.X, r.Y + r.Height - d, d, d, 90.0f, 90.0f);
+    p.CloseFigure();
+}
+
+static void fillRound(Graphics& g, const RectF& r, float rad, const Color& c) {
+    GraphicsPath p;
+    makeRound(p, r, rad);
+    SolidBrush b(c);
+    g.FillPath(&b, &p);
+}
+
+static void strokeRound(Graphics& g, const RectF& r, float rad, const Color& c, float w) {
+    GraphicsPath p;
+    makeRound(p, r, rad);
+    Pen pen(c, w);
+    g.DrawPath(&pen, &p);
+}
+
+static void drawText(Graphics& g, const wstring& s, Font* f, const Color& c, const RectF& r,
+                     StringAlignment ha = StringAlignmentNear,
+                     StringAlignment va = StringAlignmentCenter) {
+    if (!f || s.empty()) return;
+    StringFormat sf;
+    sf.SetAlignment(ha);
+    sf.SetLineAlignment(va);
+    sf.SetFormatFlags(StringFormatFlagsNoWrap);
+    sf.SetTrimming(StringTrimmingEllipsisCharacter);
+    SolidBrush b(c);
+    g.DrawString(s.c_str(), (INT)s.size(), f, r, &sf, &b);
+}
+
+static RectF rectToF(const RECT& r) {
+    return RectF((REAL)r.left, (REAL)r.top, (REAL)(r.right - r.left), (REAL)(r.bottom - r.top));
+}
+
+// ----------------------------------------------------------------------------
+// 布局
+// ----------------------------------------------------------------------------
+
+struct Layout {
+    int cliW = 0, cliH = 0;
+    int pad = 0, headerH = 0, sideW = 0, gapX = 0, cardHeaderH = 0;
+    RECT card{};
+    RECT edit{};
+    RECT scroll{};
+    RECT buttons[4]{};
+};
+
+static Layout g_L;
+
+static void computeLayout(int w, int h) {
+    g_L.cliW = w;
+    g_L.cliH = h;
+    g_L.pad = px(24);
+    g_L.headerH = px(72);
+    g_L.sideW = px(196);
+    g_L.gapX = px(24);
+    g_L.cardHeaderH = px(52);
+
+    int cardX = g_L.pad + g_L.sideW + g_L.gapX;
+    int cardY = g_L.headerH + g_L.pad;
+    int cardR = w - g_L.pad;
+    int cardB = h - g_L.pad;
+    if (cardR < cardX + px(200)) cardR = cardX + px(200);
+    if (cardB < cardY + px(160)) cardB = cardY + px(160);
+    g_L.card = {cardX, cardY, cardR, cardB};
+
+    int bodyTop = cardY + g_L.cardHeaderH;
+    g_L.edit = {cardX + 1, bodyTop, cardR - 1 - px(20), cardB - px(12)};
+
+    int sbW = px(8);
+    int sbX = cardR - 1 - px(16);
+    g_L.scroll = {sbX, bodyTop + px(10), sbX + sbW, cardB - px(12) - px(10)};
+
+    int bx = g_L.pad;
+    int bw = g_L.sideW;
+    int y = g_L.headerH + g_L.pad;
+    int bh = px(44);
+    g_L.buttons[0] = {bx, y, bx + bw, y + bh};
+    y += bh + px(10);
+    g_L.buttons[1] = {bx, y, bx + bw, y + bh};
+    y += bh + px(16);
+    g_L.buttons[2] = {bx, y, bx + bw, y + px(40)};
+    y += px(40) + px(8);
+    g_L.buttons[3] = {bx, y, bx + bw, y + px(38)};
+}
+
+// ----------------------------------------------------------------------------
+// 按钮（自绘）
+// ----------------------------------------------------------------------------
+
+struct BtnState {
+    WNDPROC oldProc = nullptr;
+    Color bg, bgHover, bgDown, border, fg;
+    bool hasBorder = false;
+    bool bold = false;
+    bool hover = false;
+    int radius = 8;
+};
+
+static BtnState g_stFetch, g_stRun, g_stStop, g_stOpen;
+
+static void initButtonState(BtnState& st, const Color& bg, const Color& bgHover, const Color& bgDown,
+                            const Color& border, const Color& fg, bool bold, int radius) {
+    st.bg = bg;
+    st.bgHover = bgHover;
+    st.bgDown = bgDown;
+    st.border = border;
+    st.fg = fg;
+    st.bold = bold;
+    st.hasBorder = (border.GetA() != 0);
+    st.radius = radius;
+}
+
+static LRESULT CALLBACK ButtonProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    BtnState* st = (BtnState*)GetWindowLongPtrW(h, GWLP_USERDATA);
+    switch (m) {
+        case WM_MOUSEMOVE:
+            if (st && !st->hover) {
+                TRACKMOUSEEVENT tme;
+                tme.cbSize = sizeof(tme);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = h;
+                tme.dwHoverTime = 0;
+                TrackMouseEvent(&tme);
+                st->hover = true;
+                InvalidateRect(h, nullptr, FALSE);
+            }
+            break;
+        case WM_MOUSELEAVE:
+            if (st) {
+                st->hover = false;
+                InvalidateRect(h, nullptr, FALSE);
+            }
+            break;
+        case WM_SETCURSOR:
+            if (LOWORD(l) == HTCLIENT && IsWindowEnabled(h)) {
+                SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                return TRUE;
+            }
+            break;
+        case WM_LBUTTONDOWN:
+        case WM_LBUTTONUP:
+            InvalidateRect(h, nullptr, FALSE);
+            break;
+    }
+    return CallWindowProcW(st ? st->oldProc : DefWindowProcW, h, m, w, l);
+}
+
+static void drawButton(LPDRAWITEMSTRUCT dis) {
+    BtnState* st = (BtnState*)GetWindowLongPtrW(dis->hwndItem, GWLP_USERDATA);
+    if (!st) return;
+
+    bool disabled = (dis->itemState & ODS_DISABLED) != 0;
+    bool pressed = (dis->itemState & ODS_SELECTED) != 0;
+
+    Color bg = disabled ? C::DISABLED_BG : pressed ? st->bgDown : (st->hover ? st->bgHover : st->bg);
+    Color fg = disabled ? C::DISABLED_FG : st->fg;
+
+    wchar_t buf[128] = {0};
+    GetWindowTextW(dis->hwndItem, buf, 128);
+
+    Graphics g(dis->hDC);
+    g.SetSmoothingMode(SmoothingModeAntiAlias);
+    g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
+
+    RectF r = rectToF(dis->rcItem);
+    // 底色先铺满，避免自绘残留
+    SolidBrush clear(C::BG);
+    g.FillRectangle(&clear, r);
+
+    RectF inner(r.X + 0.5f, r.Y + 0.5f, r.Width - 1.0f, r.Height - 1.0f);
+    float rad = (float)px(st->radius);
+    fillRound(g, inner, rad, bg);
+    if (st->hasBorder && !disabled) strokeRound(g, inner, rad, st->border, 1.0f);
+
+    drawText(g, buf, st->bold ? g_fBtnBold : g_fBtn, fg, inner,
+             StringAlignmentCenter, StringAlignmentCenter);
+}
+
+// ----------------------------------------------------------------------------
+// 滚动条（自绘，贴在卡片右侧）
+// ----------------------------------------------------------------------------
+
+struct SbState {
+    WNDPROC oldProc = nullptr;
+    bool hover = false;
+    bool dragging = false;
+    int dragY = 0;
+    int dragFirst = 0;
+};
+
+static SbState g_sbState;
+
+static int editLineHeight() {
+    if (!g_txt) return 16;
+    HDC dc = GetDC(g_txt);
+    HFONT f = (HFONT)SendMessageW(g_txt, WM_GETFONT, 0, 0);
+    HGDIOBJ old = f ? SelectObject(dc, f) : nullptr;
+    TEXTMETRICW tm;
+    ZeroMemory(&tm, sizeof(tm));
+    GetTextMetricsW(dc, &tm);
+    if (old) SelectObject(dc, old);
+    ReleaseDC(g_txt, dc);
+    return tm.tmHeight > 0 ? tm.tmHeight : px(16);
+}
+
+static bool sbMetrics(int& total, int& first, int& vis, int& maxFirst) {
+    if (!g_txt) return false;
+    total = (int)SendMessageW(g_txt, EM_GETLINECOUNT, 0, 0);
+    first = (int)SendMessageW(g_txt, EM_GETFIRSTVISIBLELINE, 0, 0);
+    int lineH = editLineHeight();
+    int h = g_L.edit.bottom - g_L.edit.top;
+    vis = lineH > 0 ? h / lineH : 1;
+    if (vis < 1) vis = 1;
+    maxFirst = total - vis;
+    if (maxFirst < 0) maxFirst = 0;
+    return maxFirst > 0;
+}
+
+static void sbPaint(HWND h) {
+    PAINTSTRUCT ps;
+    HDC hdc = BeginPaint(h, &ps);
+
+    RECT rc;
+    GetClientRect(h, &rc);
+    int trackH = rc.bottom - rc.top;
+
+    Graphics g(hdc);
+    g.SetSmoothingMode(SmoothingModeAntiAlias);
+    SolidBrush bg(C::CARD);
+    g.FillRectangle(&bg, 0, 0, rc.right, rc.bottom);
+
+    int total = 0, first = 0, vis = 0, maxFirst = 0;
+    if (trackH > 0 && sbMetrics(total, first, vis, maxFirst)) {
+        int thumbH = (int)((double)trackH * vis / (double)total);
+        int minH = px(28);
+        if (thumbH < minH) thumbH = minH;
+        if (thumbH > trackH) thumbH = trackH;
+        int span = trackH - thumbH;
+        int ty = span > 0 ? (int)((double)span * first / (double)maxFirst) : 0;
+        if (ty < 0) ty = 0;
+        if (ty > span) ty = span;
+
+        float w = (float)(rc.right - rc.left);
+        RectF tr(0.0f, (REAL)ty, w, (REAL)thumbH);
+        fillRound(g, tr, w / 2.0f, g_sbState.hover ? C::THUMB_HOVER : C::THUMB);
+    }
+
+    EndPaint(h, &ps);
+}
+
+static void sbScrollToFirst(int target) {
+    if (!g_txt) return;
+    int total = 0, first = 0, vis = 0, maxFirst = 0;
+    if (!sbMetrics(total, first, vis, maxFirst)) return;
+    if (target < 0) target = 0;
+    if (target > maxFirst) target = maxFirst;
+    SendMessageW(g_txt, EM_LINESCROLL, 0, (LPARAM)(target - first));
+    InvalidateRect(g_sb, nullptr, FALSE);
+}
+
+static void sbScrollBy(int lines) {
+    if (!g_txt) return;
+    int first = (int)SendMessageW(g_txt, EM_GETFIRSTVISIBLELINE, 0, 0);
+    sbScrollToFirst(first + lines);
+}
+
+static LRESULT CALLBACK SbProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    switch (m) {
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT:
+            sbPaint(h);
+            return 0;
+        case WM_MOUSEMOVE: {
+            if (!g_sbState.hover) {
+                TRACKMOUSEEVENT tme;
+                tme.cbSize = sizeof(tme);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = h;
+                tme.dwHoverTime = 0;
+                TrackMouseEvent(&tme);
+                g_sbState.hover = true;
+                InvalidateRect(h, nullptr, FALSE);
+            }
+            if (g_sbState.dragging) {
+                RECT rc;
+                GetClientRect(h, &rc);
+                int trackH = rc.bottom - rc.top;
+                int total = 0, first = 0, vis = 0, maxFirst = 0;
+                if (sbMetrics(total, first, vis, maxFirst) && trackH > 0) {
+                    int thumbH = (int)((double)trackH * vis / (double)total);
+                    int minH = px(28);
+                    if (thumbH < minH) thumbH = minH;
+                    int span = trackH - thumbH;
+                    if (span > 0) {
+                        int dy = mouseY(l) - g_sbState.dragY;
+                        int target = g_sbState.dragFirst + (int)((double)dy * maxFirst / (double)span);
+                        sbScrollToFirst(target);
+                    }
+                }
+            }
+            return 0;
+        }
+        case WM_MOUSELEAVE:
+            g_sbState.hover = false;
+            InvalidateRect(h, nullptr, FALSE);
+            return 0;
+        case WM_LBUTTONDOWN: {
+            SetCapture(h);
+            int total = 0, first = 0, vis = 0, maxFirst = 0;
+            if (!sbMetrics(total, first, vis, maxFirst)) return 0;
+            RECT rc;
+            GetClientRect(h, &rc);
+            int trackH = rc.bottom - rc.top;
+            int thumbH = (int)((double)trackH * vis / (double)total);
+            int minH = px(28);
+            if (thumbH < minH) thumbH = minH;
+            int span = trackH - thumbH;
+            int ty = span > 0 ? (int)((double)span * first / (double)maxFirst) : 0;
+            int y = mouseY(l);
+            if (y >= ty && y <= ty + thumbH) {
+                g_sbState.dragging = true;
+                g_sbState.dragY = y;
+                g_sbState.dragFirst = first;
+            } else {
+                // 点击空白处翻页
+                sbScrollBy(y < ty ? -(vis - 1) : (vis - 1));
+            }
+            return 0;
+        }
+        case WM_LBUTTONUP:
+            g_sbState.dragging = false;
+            ReleaseCapture();
+            return 0;
+        case WM_MOUSEWHEEL: {
+            int delta = GET_WHEEL_DELTA_WPARAM(w);
+            sbScrollBy(-(delta / WHEEL_DELTA) * 3);
+            return 0;
+        }
+        case WM_SETCURSOR:
+            if (LOWORD(l) == HTCLIENT) {
+                SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+                return TRUE;
+            }
+            break;
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+
+// ----------------------------------------------------------------------------
+// 输出区（只读编辑框，自绘滚动条代为滚动）
+// ----------------------------------------------------------------------------
+
+static WNDPROC g_editOldProc = nullptr;
+
+static LRESULT CALLBACK EditProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    switch (m) {
+        case WM_MOUSEWHEEL: {
+            int delta = GET_WHEEL_DELTA_WPARAM(w);
+            sbScrollBy(-(delta / WHEEL_DELTA) * 3);
+            return 0;
+        }
+        case WM_KEYDOWN:
+            if (w == VK_PRIOR || w == VK_NEXT || w == VK_HOME || w == VK_END) {
+                LRESULT r = CallWindowProcW(g_editOldProc, h, m, w, l);
+                InvalidateRect(g_sb, nullptr, FALSE);
+                return r;
+            }
+            break;
+        case WM_VSCROLL:
+        case WM_SETFOCUS:
+            InvalidateRect(g_sb, nullptr, FALSE);
+            break;
+    }
+    return CallWindowProcW(g_editOldProc, h, m, w, l);
+}
+
+// ----------------------------------------------------------------------------
 // 界面辅助
 // ----------------------------------------------------------------------------
 
@@ -171,10 +608,17 @@ static void appendText(const wstring& w) {
     SendMessageW(g_txt, EM_SETSEL, (WPARAM)len, (LPARAM)len);
     SendMessageW(g_txt, EM_REPLACESEL, FALSE, (LPARAM)w.c_str());
     SendMessageW(g_txt, EM_SCROLLCARET, 0, 0);
+    InvalidateRect(g_sb, nullptr, FALSE);
 }
 
-static void setStatus(const wstring& s) {
-    if (g_status) SetWindowTextW(g_status, s.c_str());
+enum class StatusKind { Idle, Busy, Ok, Error };
+static wstring g_statusText = L"就绪";
+static StatusKind g_statusKind = StatusKind::Idle;
+
+static void setStatus(const wstring& s, StatusKind k = StatusKind::Idle) {
+    g_statusText = s;
+    g_statusKind = k;
+    if (g_hwnd) InvalidateRect(g_hwnd, nullptr, FALSE);
 }
 
 static void setBusy(bool busy, bool fetching) {
@@ -202,8 +646,8 @@ static wstring scanSummary() {
         FindClose(h);
     }
     wchar_t buf[256];
-    if (n == 0) swprintf(buf, 256, L"就绪：output\\ 里还没有稿件，先点「获取新闻稿」");
-    else swprintf(buf, 256, L"就绪：%d 份稿件，最新 %ls", n, newest.c_str());
+    if (n == 0) swprintf(buf, 256, L"还没有稿件，先获取新闻稿");
+    else swprintf(buf, 256, L"%d 份稿件 · 最新 %ls", n, newest.c_str());
     return buf;
 }
 
@@ -355,64 +799,99 @@ static wstring interpretCommand() {
 }
 
 // ----------------------------------------------------------------------------
-// 窗口过程
+// 字体 / 控件
 // ----------------------------------------------------------------------------
 
-static void layout(HWND hwnd) {
-    RECT rc;
-    GetClientRect(hwnd, &rc);
-    int pad = 10, btnH = 32, btnW = 122, gap = 8, statusH = 24;
-    int x = pad, y = pad;
-    MoveWindow(g_btnFetch, x, y, btnW, btnH, TRUE); x += btnW + gap;
-    MoveWindow(g_btnRun, x, y, btnW, btnH, TRUE); x += btnW + gap;
-    MoveWindow(g_btnStop, x, y, 72, btnH, TRUE); x += 72 + gap;
-    MoveWindow(g_btnOpen, x, y, btnW, btnH, TRUE);
+static void createFonts() {
+    FontFamily tmp(L"Microsoft YaHei UI");
+    if (tmp.GetLastStatus() == Ok) g_family = new FontFamily(L"Microsoft YaHei UI");
+    else g_family = new FontFamily(L"Microsoft YaHei");
 
-    int top = y + btnH + pad;
-    int editH = rc.bottom - top - statusH - pad;
-    if (editH < 80) editH = 80;
-    MoveWindow(g_txt, pad, top, rc.right - 2 * pad, editH, TRUE);
-    MoveWindow(g_status, pad, rc.bottom - statusH - 4, rc.right - 2 * pad, statusH, TRUE);
+    g_fTitle = new Font(g_family, (REAL)px(21), FontStyleBold, UnitPixel);
+    g_fSub = new Font(g_family, (REAL)px(13), FontStyleRegular, UnitPixel);
+    g_fBtn = new Font(g_family, (REAL)px(15), FontStyleRegular, UnitPixel);
+    g_fBtnBold = new Font(g_family, (REAL)px(15), FontStyleBold, UnitPixel);
+    g_fCard = new Font(g_family, (REAL)px(15), FontStyleBold, UnitPixel);
+    g_fPill = new Font(g_family, (REAL)px(12), FontStyleRegular, UnitPixel);
+    g_fSmall = new Font(g_family, (REAL)px(12), FontStyleRegular, UnitPixel);
+}
+
+static void destroyFonts() {
+    delete g_fSmall; g_fSmall = nullptr;
+    delete g_fPill; g_fPill = nullptr;
+    delete g_fCard; g_fCard = nullptr;
+    delete g_fBtnBold; g_fBtnBold = nullptr;
+    delete g_fBtn; g_fBtn = nullptr;
+    delete g_fSub; g_fSub = nullptr;
+    delete g_fTitle; g_fTitle = nullptr;
+    delete g_family; g_family = nullptr;
+}
+
+static void applyEditFormatRect() {
+    if (!g_txt) return;
+    RECT rc;
+    GetClientRect(g_txt, &rc);
+    RECT fmt;
+    fmt.left = px(20);    // 与卡片标题「输出」左对齐
+    fmt.top = px(14);
+    fmt.right = rc.right - px(14);
+    fmt.bottom = rc.bottom - px(10);
+    if (fmt.right < fmt.left + px(20)) fmt.right = fmt.left + px(20);
+    if (fmt.bottom < fmt.top + px(20)) fmt.bottom = fmt.top + px(20);
+    SendMessageW(g_txt, EM_SETRECT, 0, (LPARAM)&fmt);
+}
+
+static HWND makeButton(HWND parent, HINSTANCE hInst, int id, const wchar_t* text, RECT r, BtnState& st) {
+    HWND h = CreateWindowExW(0, L"BUTTON", text,
+                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                             r.left, r.top, r.right - r.left, r.bottom - r.top,
+                             parent, (HMENU)(INT_PTR)id, hInst, nullptr);
+    SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)&st);
+    st.oldProc = (WNDPROC)SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)ButtonProc);
+    SendMessageW(h, WM_SETFONT, (WPARAM)g_fontEdit, TRUE);
+    return h;
 }
 
 static void createControls(HWND hwnd) {
     HINSTANCE hInst = (HINSTANCE)GetWindowLongPtrW(hwnd, GWLP_HINSTANCE);
-    g_btnFetch = CreateWindowW(L"BUTTON", L"获取新闻稿", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                               0, 0, 0, 0, hwnd, (HMENU)ID_BTN_FETCH, hInst, nullptr);
-    g_btnRun = CreateWindowW(L"BUTTON", L"开始解读", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                             0, 0, 0, 0, hwnd, (HMENU)ID_BTN_RUN, hInst, nullptr);
-    g_btnStop = CreateWindowW(L"BUTTON", L"停止", WS_CHILD | BS_PUSHBUTTON,
-                              0, 0, 0, 0, hwnd, (HMENU)ID_BTN_STOP, hInst, nullptr);
-    g_btnOpen = CreateWindowW(L"BUTTON", L"打开稿件目录", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                              0, 0, 0, 0, hwnd, (HMENU)ID_BTN_OPEN, hInst, nullptr);
-    g_txt = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-                            WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE |
-                                ES_READONLY | ES_AUTOVSCROLL | ES_NOHIDESEL,
-                            0, 0, 0, 0, hwnd, (HMENU)ID_TXT, hInst, nullptr);
-    g_status = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT,
-                             0, 0, 0, 0, hwnd, (HMENU)ID_STATUS, hInst, nullptr);
 
-    g_fontUi = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                           OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                           DEFAULT_PITCH, L"Microsoft YaHei UI");
-    g_fontText = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                             FIXED_PITCH, L"Microsoft YaHei UI");
+    initButtonState(g_stFetch, C::ACCENT, C::ACCENT_HOVER, C::ACCENT_DOWN, Color(0, 0, 0, 0),
+                    Color(255, 255, 255, 255), true, 8);
+    initButtonState(g_stRun, C::CARD, C::ACCENT_SOFT, Color(255, 247, 236, 233), C::ACCENT,
+                    C::ACCENT, true, 8);
+    initButtonState(g_stStop, C::CARD, C::GHOST_HOVER, Color(255, 236, 231, 225), C::BORDER,
+                    C::MUTED, false, 8);
+    initButtonState(g_stOpen, Color(0, 0, 0, 0), C::GHOST_HOVER, Color(255, 236, 231, 225),
+                    Color(0, 0, 0, 0), C::MUTED, false, 8);
 
-    SendMessageW(g_btnFetch, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
-    SendMessageW(g_btnRun, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
-    SendMessageW(g_btnStop, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
-    SendMessageW(g_btnOpen, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
-    SendMessageW(g_txt, WM_SETFONT, (WPARAM)g_fontText, TRUE);
-    SendMessageW(g_status, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+    g_btnFetch = makeButton(hwnd, hInst, ID_BTN_FETCH, L"获取新闻稿", g_L.buttons[0], g_stFetch);
+    g_btnRun = makeButton(hwnd, hInst, ID_BTN_RUN, L"开始解读", g_L.buttons[1], g_stRun);
+    g_btnStop = makeButton(hwnd, hInst, ID_BTN_STOP, L"停止", g_L.buttons[2], g_stStop);
+    g_btnOpen = makeButton(hwnd, hInst, ID_BTN_OPEN, L"打开稿件目录", g_L.buttons[3], g_stOpen);
 
+    g_txt = CreateWindowExW(0, L"EDIT", L"",
+                            WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY |
+                                ES_AUTOVSCROLL | ES_NOHIDESEL,
+                            g_L.edit.left, g_L.edit.top,
+                            g_L.edit.right - g_L.edit.left, g_L.edit.bottom - g_L.edit.top,
+                            hwnd, (HMENU)ID_TXT, hInst, nullptr);
     SendMessageW(g_txt, EM_SETLIMITTEXT, 0x7FFFFFF0, 0);
+    SendMessageW(g_txt, WM_SETFONT, (WPARAM)g_fontEdit, TRUE);
+    g_editOldProc = (WNDPROC)SetWindowLongPtrW(g_txt, GWLP_WNDPROC, (LONG_PTR)EditProc);
+
+    g_sb = CreateWindowExW(0, L"DeskScroll", L"",
+                           WS_CHILD | WS_VISIBLE,
+                           g_L.scroll.left, g_L.scroll.top,
+                           g_L.scroll.right - g_L.scroll.left, g_L.scroll.bottom - g_L.scroll.top,
+                           hwnd, (HMENU)ID_SCROLL, hInst, nullptr);
+
+    applyEditFormatRect();
 
     wstring hint;
     hint += L"政策解读台 · 《新闻联播》《人民日报》\r\n\r\n";
-    hint += L"1. 点「获取新闻稿」：后台运行 运行.bat，自动补抓最近 7 天缺失的日期（首次约 15–20 分钟）。\r\n";
-    hint += L"2. 点「开始解读」：调用 agent_host.exe，按 skill/ 里的方法论解读并流式显示。\r\n";
-    hint += L"3. 解读需要 agent.ini 里配置 api_key；未配置时程序会提示。\r\n\r\n";
+    hint += L"① 点「获取新闻稿」——后台运行 运行.bat，自动补抓最近 7 天缺失的日期（首次约 15–20 分钟）。\r\n";
+    hint += L"② 点「开始解读」——调用 agent_host.exe，按 skill/ 里的方法论解读，结果逐字流式显示。\r\n";
+    hint += L"③ 解读需要 agent.ini 里配置 api_key；未配置时程序会提示。\r\n\r\n";
 
     string key = readIniKey(joinPath(exeDir(), L"agent.ini"), "api_key");
     hint += key.empty() ? L"当前状态：未配置 API 密钥（agent.ini 的 api_key= 为空）。\r\n"
@@ -421,16 +900,151 @@ static void createControls(HWND hwnd) {
     SetWindowTextW(g_txt, hint.c_str());
 }
 
+// ----------------------------------------------------------------------------
+// 自绘主界面
+// ----------------------------------------------------------------------------
+
+static void paintScene(Graphics& g, int w, int h) {
+    g.SetSmoothingMode(SmoothingModeAntiAlias);
+    g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
+
+    // 底色
+    SolidBrush bg(C::BG);
+    g.FillRectangle(&bg, 0, 0, w, h);
+
+    // ---- 顶部标题区 ----
+    int pad = g_L.pad;
+    float barX = (float)pad;
+    float barY = (float)px(16);
+    RectF bar(barX, barY, (REAL)px(4), (REAL)px(30));
+    fillRound(g, bar, (REAL)px(2), C::ACCENT);
+
+    drawText(g, L"政策解读台", g_fTitle, C::INK,
+             RectF(barX + px(14), barY - px(3), (REAL)px(320), (REAL)px(30)),
+             StringAlignmentNear, StringAlignmentCenter);
+
+    drawText(g, L"《新闻联播》《人民日报》每日抓取与政策解读", g_fSub, C::MUTED,
+             RectF(barX + px(14), barY + px(27), (REAL)px(460), (REAL)px(20)),
+             StringAlignmentNear, StringAlignmentCenter);
+
+    // ---- 状态胶囊（右上） ----
+    {
+        RectF bounds;
+        g.MeasureString(g_statusText.c_str(), (INT)g_statusText.size(), g_fPill, PointF(0, 0), &bounds);
+        float pillH = (float)px(30);
+        float pillW = px(14) * 2 + px(7) + px(8) + bounds.Width;
+        float pillX = (float)w - pad - pillW;
+        float pillY = (barY + px(30) / 2.0f) - pillH / 2.0f;
+        RectF pill(pillX, pillY, pillW, pillH);
+        fillRound(g, pill, pillH / 2.0f, C::PILL_BG);
+
+        Color dot = C::FAINT;
+        if (g_statusKind == StatusKind::Busy) dot = C::ACCENT;
+        else if (g_statusKind == StatusKind::Ok) dot = C::OK;
+        else if (g_statusKind == StatusKind::Error) dot = C::ACCENT;
+        SolidBrush db(dot);
+        float dy = pillY + pillH / 2.0f - px(7) / 2.0f;
+        g.FillEllipse(&db, pillX + px(14), dy, (REAL)px(7), (REAL)px(7));
+
+        drawText(g, g_statusText, g_fPill, C::MUTED,
+                 RectF(pillX + px(14) + px(7) + px(8), pillY, pillW - px(14) * 2 - px(7) - px(8), pillH),
+                 StringAlignmentNear, StringAlignmentCenter);
+    }
+
+    // 标题区与内容区的分隔线
+    Pen line(C::BORDER, 1.0f);
+    g.DrawLine(&line, (REAL)0, (REAL)(g_L.headerH - 1), (REAL)w, (REAL)(g_L.headerH - 1));
+
+    // ---- 右侧输出卡片 ----
+    RectF card = rectToF(g_L.card);
+    RectF cardIn(card.X + 0.5f, card.Y + 0.5f, card.Width - 1.0f, card.Height - 1.0f);
+    fillRound(g, cardIn, (REAL)px(10), C::CARD);
+    strokeRound(g, cardIn, (REAL)px(10), C::BORDER, 1.0f);
+
+    // 卡片标题栏
+    drawText(g, L"输出", g_fCard, C::INK,
+             RectF(card.X + px(20), card.Y, card.Width - px(40), (REAL)g_L.cardHeaderH),
+             StringAlignmentNear, StringAlignmentCenter);
+    drawText(g, L"output\\", g_fSmall, C::FAINT,
+             RectF(card.X + px(20), card.Y, card.Width - px(40), (REAL)g_L.cardHeaderH),
+             StringAlignmentFar, StringAlignmentCenter);
+
+    // 卡片内分隔线（不压到圆角）
+    float sepY = card.Y + g_L.cardHeaderH - 1;
+    g.DrawLine(&line, card.X + px(20), sepY, card.X + card.Width - px(20), sepY);
+
+    // ---- 左栏底部提示 ----
+    {
+        float sideBottom = (float)(h - pad);
+        float lh = (float)px(18);
+        float tipY = sideBottom - lh * 2;
+        drawText(g, L"首次使用请先获取新闻稿；", g_fSmall, C::FAINT,
+                 RectF((REAL)pad, tipY, (REAL)g_L.sideW, lh), StringAlignmentNear, StringAlignmentNear);
+        drawText(g, L"解读前在 agent.ini 填好密钥。", g_fSmall, C::FAINT,
+                 RectF((REAL)pad, tipY + lh, (REAL)g_L.sideW, lh), StringAlignmentNear, StringAlignmentNear);
+    }
+}
+
+static void onPaint(HWND hwnd) {
+    PAINTSTRUCT ps;
+    HDC hdc = BeginPaint(hwnd, &ps);
+
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    int w = rc.right - rc.left;
+    int h = rc.bottom - rc.top;
+    if (w <= 0 || h <= 0) {
+        EndPaint(hwnd, &ps);
+        return;
+    }
+
+    HDC mem = CreateCompatibleDC(hdc);
+    HBITMAP bmp = CreateCompatibleBitmap(hdc, w, h);
+    HGDIOBJ oldBmp = SelectObject(mem, bmp);
+
+    {
+        Graphics g(mem);
+        paintScene(g, w, h);
+    }
+
+    BitBlt(hdc, 0, 0, w, h, mem, 0, 0, SRCCOPY);
+
+    SelectObject(mem, oldBmp);
+    DeleteObject(bmp);
+    DeleteDC(mem);
+    EndPaint(hwnd, &ps);
+}
+
+static void layout(HWND hwnd) {
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    computeLayout(rc.right - rc.left, rc.bottom - rc.top);
+
+    HWND btns[4] = {g_btnFetch, g_btnRun, g_btnStop, g_btnOpen};
+    for (int i = 0; i < 4; ++i) {
+        const RECT& r = g_L.buttons[i];
+        MoveWindow(btns[i], r.left, r.top, r.right - r.left, r.bottom - r.top, TRUE);
+    }
+
+    MoveWindow(g_txt, g_L.edit.left, g_L.edit.top,
+               g_L.edit.right - g_L.edit.left, g_L.edit.bottom - g_L.edit.top, TRUE);
+    applyEditFormatRect();
+
+    MoveWindow(g_sb, g_L.scroll.left, g_L.scroll.top,
+               g_L.scroll.right - g_L.scroll.left, g_L.scroll.bottom - g_L.scroll.top, TRUE);
+    InvalidateRect(g_sb, nullptr, FALSE);
+}
+
 static void onFetch() {
     appendText(L"\r\n=== 获取新闻稿 ===\r\n");
-    setStatus(L"正在后台抓取（首次较慢，可随时点「停止」）…");
+    setStatus(L"正在后台抓取…", StatusKind::Busy);
     startJob(fetchCommand(), true);
 }
 
 static void onInterpret() {
     if (g_running) return;
     appendText(L"\r\n=== 开始解读 ===\r\n");
-    setStatus(L"解读中…（模型输出会逐字出现）");
+    setStatus(L"解读中…", StatusKind::Busy);
     startJob(interpretCommand(), false);
 }
 
@@ -439,22 +1053,55 @@ static void onStop() {
         CloseHandle(g_job);  // KILL_ON_JOB_CLOSE：连同子进程树一起结束
         g_job = nullptr;
     }
-    setStatus(L"已请求停止…");
+    setStatus(L"已请求停止…", StatusKind::Idle);
 }
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
-        case WM_CREATE:
+        case WM_CREATE: {
             g_hwnd = hwnd;
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            computeLayout(rc.right - rc.left, rc.bottom - rc.top);
             createControls(hwnd);
             layout(hwnd);
-            setStatus(scanSummary());
+            setStatus(scanSummary(), StatusKind::Idle);
             EnableWindow(g_btnStop, FALSE);
+            return 0;
+        }
+
+        case WM_ERASEBKGND:
+            return 1;
+
+        case WM_PAINT:
+            onPaint(hwnd);
             return 0;
 
         case WM_SIZE:
             layout(hwnd);
+            InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
+
+        case WM_GETMINMAXINFO: {
+            MINMAXINFO* mmi = (MINMAXINFO*)lp;
+            mmi->ptMinTrackSize.x = px(720);
+            mmi->ptMinTrackSize.y = px(500);
+            return 0;
+        }
+
+        case WM_DRAWITEM: {
+            LPDRAWITEMSTRUCT dis = (LPDRAWITEMSTRUCT)lp;
+            drawButton(dis);
+            return TRUE;
+        }
+
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORSTATIC: {
+            HDC hdc = (HDC)wp;
+            SetTextColor(hdc, RGB(27, 27, 27));
+            SetBkColor(hdc, RGB(255, 255, 255));
+            return (LRESULT)g_brWhite;
+        }
 
         case WM_COMMAND: {
             int id = LOWORD(wp);
@@ -477,7 +1124,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         case WM_APP_STATUS: {
             wstring* p = (wstring*)lp;
-            setStatus(*p);
+            setStatus(*p, StatusKind::Error);
             delete p;
             return 0;
         }
@@ -492,13 +1139,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                                ? wstring(L"\r\n[抓取结束]\r\n")
                                : wstring(L"\r\n[抓取进程已退出，退出码 ") + std::to_wstring(code) +
                                      L"；请查看上方输出]\r\n");
-                setStatus(scanSummary());
+                setStatus(scanSummary(), code == 0 ? StatusKind::Ok : StatusKind::Error);
             } else {
                 if (code != 0) {
                     appendText(L"\r\n[解读未完成，退出码 " + std::to_wstring(code) + L"；原因见上方]\r\n");
-                    setStatus(L"解读失败（检查 agent.ini 的 api_key / base_url / model）");
+                    setStatus(L"解读失败 · 检查 api_key", StatusKind::Error);
                 } else {
-                    setStatus(L"解读完成");
+                    setStatus(L"解读完成", StatusKind::Ok);
                 }
             }
             return 0;
@@ -506,8 +1153,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         case WM_DESTROY:
             if (g_job) { CloseHandle(g_job); g_job = nullptr; }
-            if (g_fontUi) DeleteObject(g_fontUi);
-            if (g_fontText) DeleteObject(g_fontText);
+            destroyFonts();
+            if (g_fontEdit) { DeleteObject(g_fontEdit); g_fontEdit = nullptr; }
+            if (g_brWhite) { DeleteObject(g_brWhite); g_brWhite = nullptr; }
             PostQuitMessage(0);
             return 0;
     }
@@ -516,6 +1164,22 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nCmdShow) {
     SetProcessDPIAware();
+    {
+        HDC dc = GetDC(nullptr);
+        g_dpi = GetDeviceCaps(dc, LOGPIXELSX);
+        ReleaseDC(nullptr, dc);
+        if (g_dpi <= 0) g_dpi = 96;
+    }
+
+    GdiplusStartupInput gsi;
+    ULONG_PTR token = 0;
+    if (GdiplusStartup(&token, &gsi, nullptr) != Ok) return 1;
+
+    createFonts();
+    g_fontEdit = CreateFontW(-px(16), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                             DEFAULT_PITCH, L"Microsoft YaHei UI");
+    g_brWhite = CreateSolidBrush(RGB(255, 255, 255));
 
     WNDCLASSEXW wc;
     ZeroMemory(&wc, sizeof(wc));
@@ -523,14 +1187,25 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nCmdShow) {
     wc.style = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInst;
-    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wc.lpszClassName = L"NewsDeskWindow";
     if (!RegisterClassExW(&wc)) return 1;
 
+    WNDCLASSEXW sc;
+    ZeroMemory(&sc, sizeof(sc));
+    sc.cbSize = sizeof(sc);
+    sc.style = CS_HREDRAW | CS_VREDRAW;
+    sc.lpfnWndProc = SbProc;
+    sc.hInstance = hInst;
+    sc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    sc.hbrBackground = nullptr;
+    sc.lpszClassName = L"DeskScroll";
+    if (!RegisterClassExW(&sc)) return 1;
+
     HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"政策解读台 — 新闻联播 / 人民日报",
-                                WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1000, 720,
-                                nullptr, nullptr, hInst, nullptr);
+                                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
+                                1020, 730, nullptr, nullptr, hInst, nullptr);
     if (!hwnd) return 1;
 
     ShowWindow(hwnd, nCmdShow);
@@ -541,5 +1216,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nCmdShow) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+
+    GdiplusShutdown(token);
     return 0;
 }

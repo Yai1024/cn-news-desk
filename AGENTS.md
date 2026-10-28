@@ -21,7 +21,7 @@ build_desk.bat          :: 编译 news_desk.exe + agent_host.exe
 
 ```bat
 g++ -std=c++17 -O2 -static -static-libgcc -static-libstdc++ agent_host.cpp -o agent_host.exe -lwinhttp
-g++ -std=c++17 -O2 -static -static-libgcc -static-libstdc++ -mwindows news_desk.cpp -o news_desk.exe -lshell32 -luser32 -lgdi32
+g++ -std=c++17 -O2 -static -static-libgcc -static-libstdc++ -mwindows news_desk.cpp -o news_desk.exe -lshell32 -luser32 -lgdi32 -lgdiplus
 g++ -std=c++17 -O2 -static -static-libgcc -static-libstdc++ main.cpp -o fetch_news.exe -lwinhttp -lshell32
 ```
 
@@ -31,6 +31,8 @@ g++ -std=c++17 -O2 -static -static-libgcc -static-libstdc++ main.cpp -o fetch_ne
 
 - 源码 UTF-8 无 BOM、LF 换行；中文直接写在字符串里（GCC 默认输入/执行字符集均为 UTF-8）。
 - 窗口程序用 Win32 API，不引入第三方 GUI 框架；网络统一走 WinHTTP。
+- 界面自绘用系统自带的 GDI+（`-lgdiplus`，属 Windows 组件，不算第三方框架），
+  配色与尺寸集中在 `news_desk.cpp` 顶部 `namespace C` 与 `computeLayout()`。
 - 二进制文件以 `exe` 形式随仓库分发，便于没有编译器的机器直接运行。
 
 ## 绝不提交

@@ -18,7 +18,7 @@ echo [build] Compiling agent_host.exe ...
 if errorlevel 1 goto fail
 
 echo [build] Compiling news_desk.exe ...
-"%GXX%" -std=c++17 -O2 -static -static-libgcc -static-libstdc++ -mwindows news_desk.cpp -o news_desk.exe -lshell32 -luser32 -lgdi32
+"%GXX%" -std=c++17 -O2 -static -static-libgcc -static-libstdc++ -mwindows news_desk.cpp -o news_desk.exe -lshell32 -luser32 -lgdi32 -lgdiplus
 if errorlevel 1 goto fail
 
 echo [build] OK: news_desk.exe  agent_host.exe
